@@ -1,6 +1,7 @@
 # -*- coding:UTF-8 -*-
 import requests, json, random, sys
-
+VPC_NAME = "pratice_not_delete"
+vpc_subnet = "192.168.0.0/16"
 class LOGGER:
     def __init__(self):
         pass
@@ -131,9 +132,9 @@ class PRIVATE_VPC:
             return False
         return request_result.json()["quotas"]["resources"]
 
-    def query_quota_is_limit(self, project_id, tokens, type):
+    def query_quota_is_limit(self, project_id, tokens, type, num):
         type_resource = self.get_quota(project_id, tokens ,type)
-        if type_resource is not False and (int(type_resource[0]["quota"]) - int(type_resource[0]["used"]) > 0 ):
+        if type_resource is not False and (int(type_resource[0]["quota"]) - int(type_resource[0]["used"]) >= num ):
             return True
         else:
             return False
@@ -165,6 +166,24 @@ class PRIVATE_VPC:
             print "query vpc failed"
             return False
         return request_result.json()["vpc"]
+
+    def query_vpc_list(self, project_id, tokens):
+        url = "https://%s/v1/%s/vpcs" % (self.field_endpoint_dict[self.field], project_id)
+        headers = {"X-Auth-Token": tokens}
+        request_result = requests.get(url=url, headers=headers)
+        if request_result.status_code != requests.codes.ok:
+            print "query vpc failed"
+            return False
+        return request_result.json()["vpcs"]
+
+    def query_subnet_list(self, project_id, tokens):
+        url = "https://%s/v1/%s/subnets" % (self.field_endpoint_dict[self.field], project_id)
+        headers = {"X-Auth-Token": tokens}
+        request_result = requests.get(url=url, headers=headers)
+        if request_result.status_code != requests.codes.ok:
+            print "query subnet failed"
+            return False
+        return request_result.json()["subnets"]
 
     def _create_subnet_body(self, name, cidr, gateway_ip, primary_dns, secondary_dns, az, vpc_id):
         body = {
@@ -332,6 +351,15 @@ class ECS_MANAGER:
             return False
         return request_result.json()["status"]
 
+    def query_ecs_quota(self, project_id, tokens):
+        url = "https://%s/v1/%s/cloudservers/limits" % (self.field_endpoint_dict[self.field], project_id)
+        headers = {"X-Auth-Token": tokens}
+        request_result = requests.get(url=url, headers=headers)
+        if request_result.status_code != requests.codes.ok:
+            print "query ecs_quota failed"
+            return False
+        return request_result.json()["absolute"]
+
     def _create_ecs_body(self, az, server_name, imageRef, vpcid, security_id, subnet_id, adminPass):
         body = {
             "server": {
@@ -409,6 +437,7 @@ class USER_CASE_INFO:
     az_num_value = {1: "cn-north-1", 2: "cn-east-2", 3: "cn-south-1", 4: "cn-northeast-1", 5: "ap-southeast-1"}
     image_list = [["remote_connect_windows_fault1", "remote_connect_windows_fault2", "remote_connect_windows_fault3"],
                   ["remote_connect_linux_fault1","remote_connect_linux_fault2","remote_connect_linux_fault2"]]
+    image_choice = False
     def __init__(self):
         # self.input_user_info("请输入登陆方式：1：账号登陆； 2：IAM用户登录", int)
         # 1: "account_login"  2: "IAM_user_login"
@@ -425,7 +454,9 @@ class USER_CASE_INFO:
             check_exit(False, "登陆方式错误")
         self.show_case()
         self.image_key = int(self.input_user_info("", ["0","1", "2", "3", "4", "5"]))
-        self.iamge_name = random.choice(self.image_list[self.image_key])
+        self.show_image_name(self.image_list[self.image_key])
+        self.image_choice = self.input_user_info("请选择镜像名称:", [ str(i) for i in range(len(self.image_list[self.image_key]))])
+        self.iamge_name = self.image_list[self.image_key][int(self.image_choice)]
         self.security_factor = random.choice(self.security_factor_list)
         self.acl_factor = random.choice(self.acl_factor_list)
         self.dns_factor = random.choice(self.dns_factor_list)
@@ -460,11 +491,57 @@ class USER_CASE_INFO:
         print("-"*106)
         print("请选择要构造的场景："),
 
-def resource_check():
-    print("开始进行资源检测".center(50,"-"))
-    print("开始进行检测网络资源")
+    def show_image_name(self, image_list):
+        print("镜像名称".center(40, "-"))
+        for element in image_list:
+            print("%s: %s" % (image_list.index(element), element))
 
 
+def resource_check(vpc_handle, project_id, ecs_handle, project_tokens):
+    print("开始进行资源检测".center(50, "-"))
+    if vpc_handle.query_quota_is_limit(project_id, project_tokens, "subnet", 1) is False:
+        print("子网资源配额检测-------failed")
+        check_exit(False, "子网配额不足，无法创建vpc，请清理后重试")
+    print("子网资源配额检测-------pass")
+    if vpc_handle.query_quota_is_limit(project_id, project_tokens, "securityGroup", 1) is False:
+        print("安全组资源配额检测-------failed")
+        check_exit(False, "安全组配额不足，请清理后重试")
+    print("安全组资源配额检测-------pass")
+    if vpc_handle.query_quota_is_limit(project_id, project_tokens, "securityGroupRule", 10) is False:
+        print("安全组规则资源配额检测-------failed")
+        check_exit(False, "安全组规则配额小于10条，请清理后重试")
+    print("安全组规则资源配额检测-------pass")
+    if vpc_handle.query_quota_is_limit(project_id, project_tokens, "firewall", 1) is False:
+        print("网络acl资源配额检测-------failed")
+        check_exit(False, "网络acl配额不足，请清理后重试")
+    print("网络acl资源配额检测-------pass")
+
+    exists_vpc_list = vpc_handle.query_vpc_list(project_id, project_tokens)
+    target_id = get_value_from_list(exists_vpc_list, 'id', 'name', VPC_NAME)
+    if target_id is None:
+        if vpc_handle.query_quota_is_limit(project_id, project_tokens, "vpc") is False:
+            print("vpc配额资源配额检测-------failed")
+            check_exit(False, "vpc配额不足，无法创建vpc，请清理后重试")
+        else:
+            print("vpc配额资源配额检测-------pass")
+            return True
+    else:
+        print("vpc配额资源配额检测-------pass")
+        return target_id
+
+def create_resource(vpc_handle, project_id, ecs_handle, project_tokens, vpc_id = None):
+    if vpc_id is None:
+        vpc_name = create_rand_str(10)
+        vpc_info = vpc_handle.create_vpc(project_id, project_tokens, vpc_name, vpc_subnet)
+        vpc_handle.query_vpc(project_id, project_tokens, vpc_info["id"])
+    else:
+        pass
+    subnet_name = create_rand_str(10)
+    # cidr = "192.168.240.0/24"
+    # gateway_ip = "192.168.240.1"
+    # az = "cn-north-1a"
+    # vpc_id = vpc_info["id"]
+    # subnet_id =  test.create_subnet(project_id, project_tokens, subnet_name, cidr, gateway_ip, az, vpc_id)["id"]
 if __name__ == "__main__":
     user_info = USER_CASE_INFO()
     print user_info.get_fault_factor_list()
@@ -473,6 +550,17 @@ if __name__ == "__main__":
     project_id = iam_info.get_project_id(user_info.area_name)
     vpc_handle = PRIVATE_VPC(user_info.user_name, user_info.passwd, user_info.account_name, user_info.area_name)
     ecs_handle = ECS_MANAGER(user_info.area_name)
+    t = vpc_handle.query_subnet_list(project_id, project_tokens)
+    print t
+    # exists_vpc_list =  vpc_handle.query_vpc_list(project_id, project_tokens)
+    # print get_value_from_list(exists_vpc_list, 'id', 'name', "zs-vpc-e08i")
+
+    # vpc_id = resource_check(vpc_handle, project_id, ecs_handle, project_tokens)
+    # if vpc_id is True:
+    #     create_resource(vpc_handle, project_id, ecs_handle, project_tokens)
+    # else:
+    #     create_resource(vpc_handle, project_id, ecs_handle, project_tokens, vpc_id)
+
     # test = PRIVATE_VPC("zhuwentao", "abc123456", "hwcloudsom3", field)
     # print test.create_acl_policy(project_tokens)
     # test.query_all_acl_policy(project_tokens)
